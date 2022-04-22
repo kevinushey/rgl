@@ -11,6 +11,13 @@
 # undef TYPEOF
 #endif
 
+#ifdef _WIN32
+# define kDevNull "NUL"
+#else
+# define kDevNull "/dev/null"
+#endif
+
+
 #include <R_ext/Visibility.h>
 #include <R_ext/Rdynload.h>
 #include "R.h"
@@ -26,7 +33,7 @@ using namespace rgl;
 // GLOBAL: deviceManager pointer
 //
 
-namespace rgl{
+namespace rgl {
 
 DeviceManager* deviceManager = NULL;
 
@@ -35,6 +42,49 @@ void* gHandle;
 SEXP rglNamespace;
 bool rglDebug;
 
+class SuppressOutputScope {
+public:
+  SuppressOutputScope(bool enabled)
+    : fd_(-1), fp_(nullptr)
+  {
+    // nothing to do if we're not enabled
+    if (!enabled)
+      return;
+    
+    // clone descriptor, so we can restore it later
+    fd_ = dup(STDERR_FILENO);
+    if (fd_ == -1) {
+      Rprintf("Error duplicating stderr (%i %s)", errno, strerror(errno));
+      return;
+    }
+    
+    // redirect existing descriptor -- note that freopen will close the
+    // existing 'stderr'
+    fp_ = freopen(kDevNull, "w", stderr);
+    if (fp_ == nullptr) {
+      Rprintf("Error redirecting stderr (%i %s)", errno, strerror(errno));
+      return;
+    }
+  }
+  
+  ~SuppressOutputScope()
+  {
+    if (fp_ != nullptr)
+    {
+      int fd = dup2(fd_, STDERR_FILENO);
+      if (fd == -1) {
+        Rprintf("Error restoring stderr (%i %s)", errno, strerror(errno));
+      }
+      
+      close(fd_);
+      fclose(fp_);
+    }
+  }
+  
+private:
+  int fd_;
+  FILE* fp_;
+};
 //
 // FUNCTION
 //   rgl_init
@@ -72,31 +122,18 @@ SEXP rgl_init(SEXP initValue, SEXP useNULL, SEXP in_namespace,
   else if ( !isNull(initValue) )
   {
     return ScalarInteger( 0 );
-  }  
+  }
+  
   /* Some systems write useless messages to stderr.  We'll
    * hide those
    */
-  int stderr_copy = STDERR_FILENO; /* suppress "maybe undefined" warning */
-  if (!rglDebug) {
-     int devNull = 
-#ifdef windows
-        open("nul", O_WRONLY);
-#else
-        open("/dev/null", O_WRONLY);
-#endif
-     R_FlushConsole();
-     stderr_copy = dup(STDERR_FILENO);
-     dup2(devNull, STDERR_FILENO);
-  }
-  if ( init(useNULLDevice) ) {
-    deviceManager = new DeviceManager(useNULLDevice);
-  }
-  if ( deviceManager && (useNULLDevice || deviceManager->createTestWindow()))
-       success = 1;
-  /* Restore STDERR */
-  if (!rglDebug) {
-     dup2(stderr_copy, STDERR_FILENO);
-     close(stderr_copy);
+  {
+    SuppressOutputScope scope(rglDebug);
+    if ( init(useNULLDevice) ) {
+      deviceManager = new DeviceManager(useNULLDevice);
+    }
+    if ( deviceManager && (useNULLDevice || deviceManager->createTestWindow()))
+      success = 1;
   }
   return(ScalarInteger(success));
 }
